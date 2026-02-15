@@ -1,8 +1,11 @@
+import { Routes, Route } from "react-router-dom";
+import Reset from "./Reset";
 import { useState, useEffect } from "react";
-import { fetchHistory } from "./api";
+import { fetchHistory, fetchAudit } from "./api";
 import Recorder from "./components/Recorder";
 import TranscriptCard from "./components/TranscriptCard";
 import HistoryPanel from "./components/HistoryPanel";
+
 
 export default function App() {
 
@@ -16,15 +19,38 @@ export default function App() {
   const [searchId, setSearchId] = useState("");
   const [refresh, setRefresh] = useState(0);
   const [miniHistory, setMiniHistory] = useState([]);
+  const [auditLogs, setAuditLogs] = useState([]);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isRegister, setIsRegister] = useState(false);
+  const [isForgot, setIsForgot] = useState(false);
+  const [resetPassword, setResetPassword] = useState("");
+
+
 
 
   useEffect(() => {
   fetchHistory(searchId).then(setMiniHistory);
 }, [searchId, refresh]);
+
+useEffect(() => {
+  if (tab === "audit") {
+    fetch("http://127.0.0.1:8000/audit", {
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    })
+    .then(res => res.json())
+    .then(data => setAuditLogs(data))
+    .catch(err => {
+      console.error(err);
+      alert("Failed to load audit logs");
+    });
+  }
+}, [tab, token]);
+
+
 
   async function handleResult(id, transcript) {
   setTranscript(transcript);
@@ -57,93 +83,147 @@ export default function App() {
     setStatus("Loaded from history");
   }
 
+async function handleAuth() {
+  const form = new FormData();
+
+  if (isForgot) {
+  const form = new FormData();
+  form.append("email", email);
+
+  const res = await fetch("http://127.0.0.1:8000/forgot-password", {
+    method: "POST",
+    body: form,
+  });
+
+  const data = await res.json();
+  alert(data.status);
+  setIsForgot(false);
+  return;
+}
+
+  if (isRegister) {
+
+    form.append("email", email);
+    form.append("password", password);
+
+    const res = await fetch("http://127.0.0.1:8000/register", {
+      method: "POST",
+      body: form,
+    });
+
+    let data = null;
+
+    try {
+      data = await res.json();
+    } catch (err) {
+      console.log("No JSON returned from register");
+    }
+
+    console.log("Register response:", data);
+
+    if (res.ok) {
+      alert("Registered successfully! Check console for verification link.");
+      console.log("Verification link:", data?.verification_link);
+      setIsRegister(false);
+    } else {
+      alert(data?.detail || "Registration failed");
+    }
+
+  } else {
+
+const res = await fetch("http://127.0.0.1:8000/login", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/x-www-form-urlencoded",
+  },
+  body: new URLSearchParams({
+    username: email,
+    password: password,
+  }),
+});
+
+
+    let data = null;
+
+    try {
+      data = await res.json();
+    } catch (err) {
+      console.log("No JSON returned from login");
+    }
+
+    console.log("Login response:", data);
+
+    if (res.ok && data && data.access_token) {
+      localStorage.setItem("token", data.access_token);
+      setToken(data.access_token);
+    } else {
+      alert(data?.detail || "Login failed");
+    }
+  }
+}
+
+
 if (!token) {
   return (
     <div style={styles.authContainer}>
-      <div style={styles.authBox}>
-        <h2>{isRegister ? "Create Account" : "Doctor Login"}</h2>
+      <div style={styles.authCard}>
+
+        <div style={styles.authHeader}>
+          <h2>{isRegister ? "Create Account" : "Welcome Back"}</h2>
+          <p style={{color:"#6b7280"}}>
+            {isRegister
+              ? "Register to access the clinical system"
+              : "Login to access clinical dictation"}
+          </p>
+        </div>
 
         <input
-          style={styles.input}
+          style={styles.authInput}
           placeholder="Email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
         />
 
         <input
-          style={styles.input}
+          style={styles.authInput}
           type="password"
           placeholder="Password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
         />
 
+        {!isRegister && !isForgot && (
+  <div
+    style={{ textAlign: "right", fontSize: 13, cursor: "pointer", color:"#2563eb" }}
+    onClick={() => setIsForgot(true)}
+  >
+    Forgot Password?
+  </div>
+)}
+
+
         <button
-          style={styles.primaryBtn}
-          onClick={async () => {
-            const form = new FormData();
-
-           if (isRegister) {
-  const form = new FormData();
-  form.append("email", email);
-  form.append("password", password);
-
-  try {
-    const res = await fetch("http://127.0.0.1:8000/register", {
-      method: "POST",
-      body: form,
-    });
-
-    const data = await res.json();
-    console.log("Register response:", data);
-
-    if (res.ok) {
-      alert("Account created successfully!");
-      setIsRegister(false);
-    } else {
-      alert(data.detail || "Registration failed");
-    }
-
-  } catch (err) {
-    console.error("Register error:", err);
-    alert("Server not responding");
-  }
-}
- else {
-              form.append("username", email);
-              form.append("password", password);
-
-              const res = await fetch("http://127.0.0.1:8000/login", {
-                method: "POST",
-                body: form,
-              });
-
-              const data = await res.json();
-
-              if (res.ok) {
-                localStorage.setItem("token", data.access_token);
-                setToken(data.access_token);
-              } else {
-                alert(data.detail || "Login failed");
-              }
-            }
-          }}
+          style={styles.authButton}
+          onClick={handleAuth}
         >
-          {isRegister ? "Register" : "Login"}
+          {isRegister ? "Create Account" : "Login"}
         </button>
 
-        <p
-          style={{ marginTop: 15, cursor: "pointer", color: "#2563eb" }}
-          onClick={() => setIsRegister(!isRegister)}
-        >
-          {isRegister
-            ? "Already have an account? Login"
-            : "Don't have an account? Register"}
-        </p>
+        <div style={styles.authSwitch}>
+          {isRegister ? "Already registered?" : "New here?"}
+          <span
+            style={styles.switchLink}
+            onClick={() => setIsRegister(!isRegister)}
+          >
+            {isRegister ? " Login" : " Create Account"}
+          </span>
+        </div>
+
       </div>
     </div>
   );
 }
+
 
 return (
   <div style={styles.app}>
@@ -158,6 +238,11 @@ return (
       <button onClick={()=>setTab("db")} style={styles.navBtn}>
         Database
       </button>
+
+      <button onClick={()=>setTab("audit")} style={styles.navBtn}>
+  Audit Logs
+</button>
+
 
       <button
         style={styles.logoutBtn}
@@ -249,6 +334,36 @@ return (
         </div>
       )}
 
+      {tab==="audit" && (
+  <div style={styles.card}>
+    <h3>Audit Logs</h3>
+
+    {auditLogs.length === 0 ? (
+      <p>No audit logs yet.</p>
+    ) : (
+      <div style={{maxHeight:400, overflowY:"auto"}}>
+        {auditLogs.map(log => (
+          <div
+            key={log[0]}
+            style={{
+              padding:10,
+              borderBottom:"1px solid #eee",
+              fontSize:13
+            }}
+          >
+            <strong>User:</strong> {log[1]} <br/>
+            <strong>Action:</strong> {log[2]} <br/>
+            <strong>Patient:</strong> {log[3] || "-"} <br/>
+            <strong>Session:</strong> {log[4] || "-"} <br/>
+            <strong>Time:</strong> {new Date(log[5]*1000).toLocaleString()}
+          </div>
+        ))}
+      </div>
+    )}
+  </div>
+)}
+
+
     </main>
 
   </div>
@@ -304,14 +419,6 @@ const styles = {
     marginBottom: 10
   },
 
-  authContainer: {
-    display: "flex",
-    justifyContent: "center",
-    alignItems: "center",
-    height: "100vh",
-    background: "#f3f4f6"
-  },
-
   authBox: {
     width: 350,
     padding: 30,
@@ -341,5 +448,59 @@ const styles = {
     border: "none",
     borderRadius: 6,
     cursor: "pointer"
-  }
+  },
+  
+  authContainer: {
+  display: "flex",
+  justifyContent: "center",
+  alignItems: "center",
+  height: "100vh",
+  background: "linear-gradient(135deg,#0f172a,#1e293b)"
+},
+
+authCard: {
+  width: 380,
+  background: "white",
+  padding: 35,
+  borderRadius: 16,
+  boxShadow: "0 15px 35px rgba(0,0,0,0.25)"
+},
+
+authHeader: {
+  marginBottom: 25
+},
+
+authInput: {
+  width: "100%",
+  padding: 12,
+  marginBottom: 15,
+  borderRadius: 8,
+  border: "1px solid #e5e7eb",
+  fontSize: 14
+},
+
+authButton: {
+  width: "100%",
+  padding: 12,
+  background: "#2563eb",
+  color: "white",
+  border: "none",
+  borderRadius: 8,
+  fontWeight: "600",
+  cursor: "pointer",
+  marginBottom: 15
+},
+
+authSwitch: {
+  textAlign: "center",
+  fontSize: 14
+},
+
+switchLink: {
+  color: "#2563eb",
+  cursor: "pointer",
+  marginLeft: 5,
+  fontWeight: "600"
+},
+
 };

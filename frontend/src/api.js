@@ -59,3 +59,18 @@ export async function fetchAllHistory() {
 
   return r.json();
 }
+
+
+export async function fetchAudit() {
+  const token = localStorage.getItem("token");
+
+  const res = await fetch("http://127.0.0.1:8000/audit", {
+    headers: {
+      Authorization: `Bearer ${token}`
+    }
+  });
+
+  if (!res.ok) throw new Error("Failed to fetch audit logs");
+
+  return res.json();
+}

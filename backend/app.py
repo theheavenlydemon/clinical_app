@@ -5,7 +5,10 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from passlib.context import CryptContext
 import jwt
 from datetime import datetime, timedelta
+import os
+from dotenv import load_dotenv
 
+load_dotenv()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(BASE_DIR, "records.db")
@@ -37,6 +40,17 @@ CREATE TABLE IF NOT EXISTS users (
     verified INTEGER DEFAULT 0
 )
 """)
+    c.execute("""
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_email TEXT,
+    action TEXT,
+    patient_id TEXT,
+    session_id TEXT,
+    timestamp INTEGER
+)
+""")
+
 
 
     conn.commit()
@@ -140,6 +154,104 @@ def create_verification_token(email: str):
         algorithm=ALGORITHM
     )
 
+def create_reset_token(email: str):
+    return jwt.encode(
+        {
+            "email": email,
+            "exp": datetime.utcnow() + timedelta(hours=1)
+        },
+        SECRET_KEY,
+        algorithm=ALGORITHM
+    )
+
+
+def log_action(user_email, action, patient_id=None, session_id=None):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+
+    c.execute(
+        "INSERT INTO audit_logs (user_email, action, patient_id, session_id, timestamp) VALUES (?,?,?,?,?)",
+        (
+            user_email,
+            action,
+            patient_id,
+            session_id,
+            int(time.time())
+        )
+    )
+
+    conn.commit()
+    conn.close()
+
+
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+EMAIL_USER = os.getenv("EMAIL_USER")
+EMAIL_PASS = os.getenv("EMAIL_PASS")
+
+def send_verification_email(to_email, token):
+    verification_link = f"http://127.0.0.1:8000/verify/{token}"
+
+    message = MIMEMultipart()
+    message["From"] = EMAIL_USER
+    message["To"] = to_email
+    message["Subject"] = "Verify Your Clinical App Account"
+
+    body = f"""
+    Welcome to Clinical Dictation System.
+
+    Please click the link below to verify your account:
+
+    {verification_link}
+
+    This link expires in 24 hours.
+    """
+
+    message.attach(MIMEText(body, "plain"))
+
+    try:
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(EMAIL_USER, EMAIL_PASS)
+        server.sendmail(EMAIL_USER, to_email, message.as_string())
+        server.quit()
+        print("Verification email sent to", to_email)
+    except Exception as e:
+        print("Email sending failed:", e)
+
+def send_reset_email(to_email, token):
+    reset_link = f"http://127.0.0.1:5173/reset/{token}"
+
+    message = MIMEMultipart()
+    message["From"] = EMAIL_USER
+    message["To"] = to_email
+    message["Subject"] = "Reset Your Clinical App Password"
+
+    body = f"""
+You requested a password reset.
+
+Click the link below to set a new password:
+
+{reset_link}
+
+This link expires in 1 hour.
+"""
+
+    message.attach(MIMEText(body, "plain"))
+
+    try:
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(EMAIL_USER, EMAIL_PASS)
+        server.sendmail(EMAIL_USER, to_email, message.as_string())
+        server.quit()
+        print("Reset email sent to", to_email)
+    except Exception as e:
+        print("Reset email failed:", e)
+
+
 def get_current_user(token: str = Depends(oauth2_scheme)):
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -182,6 +294,8 @@ async def transcribe(
     )
     conn.commit()
     conn.close()
+
+    log_action(user["sub"], "transcription_created", patient_id, sid)
 
     return {
         "id": sid,
@@ -300,6 +414,7 @@ def delete_session(sid: str):
     c.execute("DELETE FROM sessions WHERE id=?", (sid,))
     conn.commit()
     conn.close()
+    log_action(user["sub"], "session_deleted", None, sid)
     return {"status": "deleted"}
 
 @app.post("/register")
@@ -309,31 +424,42 @@ def register(email: str = Form(...), password: str = Form(...)):
 
     # Password strength check
     if not password_schema.validate(password):
+        conn.close()
         raise HTTPException(
             status_code=400,
             detail="Password must be 8+ chars with uppercase, lowercase, number, and symbol"
         )
-    if len(password.encode("utf-8")) > 72:
-        raise HTTPException(
-        status_code=400,
-        detail="Password too long (max 72 characters)."
-    )
 
+    # bcrypt limit check
+    if len(password.encode("utf-8")) > 72:
+        conn.close()
+        raise HTTPException(
+            status_code=400,
+            detail="Password too long (max 72 characters)."
+        )
 
     hashed = hash_password(password)
 
     try:
         c.execute(
-            "INSERT INTO users(email,password,role) VALUES (?,?,?)",
-            (email, hashed, "doctor")
+            "INSERT INTO users(email,password,role,verified) VALUES (?,?,?,?)",
+            (email, hashed, "doctor", 0)
         )
         conn.commit()
+
     except:
         conn.close()
         raise HTTPException(status_code=400, detail="User exists")
 
+    # Create verification token AFTER successful insert
+    token = create_verification_token(email)
+    send_verification_email(email, token)
+
     conn.close()
-    return {"status": "created"}
+
+    return {
+    "status": "Registration successful. Check your email to verify."
+}
 
 
 @app.post("/login")
@@ -341,7 +467,6 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
     conn = sqlite3.connect(DB)
     c = conn.cursor()
 
-    # Get user by email
     user = c.execute(
         "SELECT * FROM users WHERE email=?",
         (form_data.username,)
@@ -351,47 +476,12 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
         conn.close()
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    import time
-    now = int(time.time())
-
-    # ---------- STEP 4: Account Lock Check ----------
-
-    if user[5] and user[5] > now:
-        conn.close()
-        raise HTTPException(
-            status_code=403,
-            detail="Account temporarily locked. Try again later."
-        )
-
-    # ---------- Password Check ----------
-
+    # Check password
     if not verify_password(form_data.password, user[2]):
-
-        failed_attempts = user[4] + 1
-        lock_time = 0
-
-        if failed_attempts >= 5:
-            lock_time = now + 300  # lock for 5 minutes
-
-        c.execute(
-            "UPDATE users SET failed_attempts=?, locked_until=? WHERE id=?",
-            (failed_attempts, lock_time, user[0])
-        )
-        conn.commit()
         conn.close()
-
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    # ---------- Reset Failed Attempts on Success ----------
-
-    c.execute(
-        "UPDATE users SET failed_attempts=0, locked_until=0 WHERE id=?",
-        (user[0],)
-    )
-    conn.commit()
-
-    # ---------- STEP 5: Email Verification Check ----------
-
+    # 🔥 FIXED VERIFICATION CHECK
     if user[6] == 0:
         conn.close()
         raise HTTPException(
@@ -399,16 +489,81 @@ def login(form_data: OAuth2PasswordRequestForm = Depends()):
             detail="Please verify your email before logging in."
         )
 
-    conn.close()
-
-    # ---------- Generate JWT Token ----------
-
     token = create_token({
         "sub": user[1],
         "role": user[3]
     })
 
+    log_action(user[1], "login_success")
+
+
+    conn.close()
+
     return {
         "access_token": token,
         "token_type": "bearer"
     }
+
+@app.post("/forgot-password")
+def forgot_password(email: str = Form(...)):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+
+    user = c.execute(
+        "SELECT * FROM users WHERE email=?",
+        (email,)
+    ).fetchone()
+
+    # Always return same response (security best practice)
+    if user:
+        token = create_reset_token(email)
+        send_reset_email(email, token)
+
+    conn.close()
+
+    return {"status": "If account exists, reset email sent."}
+
+@app.post("/reset-password/{token}")
+def reset_password(token: str, new_password: str = Form(...)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email = payload["email"]
+
+        if not password_schema.validate(new_password):
+            raise HTTPException(
+                status_code=400,
+                detail="Password must meet complexity requirements."
+            )
+
+        hashed = hash_password(new_password)
+
+        conn = sqlite3.connect(DB)
+        c = conn.cursor()
+
+        c.execute(
+            "UPDATE users SET password=? WHERE email=?",
+            (hashed, email)
+        )
+
+        conn.commit()
+        conn.close()
+
+        return {"status": "Password reset successful"}
+
+    except Exception as e:
+        print("Reset error:", e)
+        raise HTTPException(status_code=400, detail="Invalid or expired token")
+
+
+@app.get("/audit")
+def get_audit(user=Depends(get_current_user)):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+
+    logs = c.execute(
+        "SELECT * FROM audit_logs ORDER BY timestamp DESC"
+    ).fetchall()
+
+    conn.close()
+
+    return logs
